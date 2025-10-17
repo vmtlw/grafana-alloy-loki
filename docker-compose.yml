@@ -14,8 +14,10 @@ services:
       GF_SECURITY_ADMIN_USER: "admin"
       GF_SECURITY_ADMIN_PASSWORD: "admin"
       GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_FEATURE_TOGGLES_ENABLE: "traceqlEditor metricsSummary"
     depends_on:
       - loki
+      - tempo
     entrypoint:
       - sh
       - -euc
@@ -24,6 +26,11 @@ services:
         cat <<EOF > /etc/grafana/provisioning/datasources/ds.yaml
         apiVersion: 1
         datasources:
+          - name: Prometheus
+            type: prometheus
+            access: proxy
+            url: http://prometheus:9090
+            isDefault: true
           - name: Loki
             type: loki
             access: proxy
@@ -32,6 +39,25 @@ services:
               httpHeaderName1: "X-Scope-OrgID"
             secureJsonData:
               httpHeaderValue1: "tenant1"
+
+          - name: Tempo
+            type: tempo
+            access: proxy
+            url: http://tempo:3200
+            basicAuth: false
+            jsonData:
+              httpMethod: GET
+              tracesToLogs:
+                datasourceUid: Loki
+                filterByTraceID: true
+                mapTagNamesEnabled: true
+                spanStartTimeShift: "1h"
+                spanEndTimeShift: "1h"
+              tracesToMetrics:
+                datasourceUid: Prometheus
+                tags: [{ key: "service.name", value: "job" }]
+              serviceMap:
+                datasourceUid: Prometheus
         EOF
         /run.sh
 
@@ -58,9 +84,45 @@ services:
       - proxy
 
 
+  tempo:
+    image: grafana/tempo:latest
+    command: [ "-config.file=/etc/tempo.yaml" ]
+    environment:
+      - GRPC_TRACE=api
+    volumes:
+      - ./tempo.yaml:/etc/tempo.yaml
+      - tempo-data:/var/tempo
+    networks:
+      - proxy
+
+  k6-tracing:
+    image: ghcr.io/grafana/xk6-client-tracing:v0.0.7
+    environment:
+      - ENDPOINT=tempo:4317
+      - TEMPO_X_SCOPE_ORGID=test
+    restart: always
+    depends_on:
+      - tempo
+    networks:
+    - proxy
+
+  prometheus:
+    image: prom/prometheus:latest
+    command:
+      - --config.file=/etc/prometheus.yaml
+      - --web.enable-remote-write-receiver
+      - --enable-feature=exemplar-storage
+      - --enable-feature=native-histograms
+    volumes:
+      - ./prometheus.yaml:/etc/prometheus.yaml
+    networks:
+      - proxy
+
+
 volumes:
   grafana-data:
   provisioning:
+  tempo-data:
 
 networks:
   proxy:
